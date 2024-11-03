@@ -1,0 +1,5 @@
+Num of cores: 9
+a: 1, b: 100, epsilon: 1e-06, s: 12
+
+Time taken: 62.3388 seconds
+Max value: 3.33333

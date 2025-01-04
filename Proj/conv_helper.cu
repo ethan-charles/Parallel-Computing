@@ -1,43 +1,44 @@
 #include <vector>
+#include <cudnn.h>
+#include <iostream>
 
-// CUDA Kernel for 3D convolution
-__global__ void convolution3d(const float *input, const float *psf, float *output,
-                              int inputX, int inputY, int inputZ,
-                              int psfX, int psfY, int psfZ) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    int z = blockIdx.z * blockDim.z + threadIdx.z;
-
-    if (x < inputX && y < inputY && z < inputZ) {
-        float value = 0.0f;
-
-        for (int i = 0; i < psfX; ++i) {
-            for (int j = 0; j < psfY; ++j) {
-                for (int k = 0; k < psfZ; ++k) {
-                    int xi = x + i - psfX / 2;
-                    int yj = y + j - psfY / 2;
-                    int zk = z + k - psfZ / 2;
-
-                    if (xi >= 0 && xi < inputX && yj >= 0 && yj < inputY && zk >= 0 && zk < inputZ) {
-                        value += input[(zk * inputY + yj) * inputX + xi] *
-                                 psf[(k * psfY + j) * psfX + i];
-                    }
-                }
-            }
-        }
-        output[(z * inputY + y) * inputX + x] = value;
+// Utility function for cuDNN error handling
+void checkCUDNN(cudnnStatus_t status) {
+    if (status != CUDNN_STATUS_SUCCESS) {
+        std::cerr << "cuDNN Error: " << cudnnGetErrorString(status) << std::endl;
+        exit(EXIT_FAILURE);
     }
 }
 
-// Forward mapping (H)
+// Forward mapping (H) using cuDNN
 void H(const std::vector<float> &input, const std::vector<float> &psf, std::vector<float> &output,
        int inputX, int inputY, int inputZ,
        int psfX, int psfY, int psfZ) {
+    cudnnHandle_t cudnn;
+    cudnnCreate(&cudnn);
+
+    // Tensor descriptors
+    cudnnTensorDescriptor_t inputDesc, outputDesc;
+    cudnnFilterDescriptor_t filterDesc;
+    cudnnConvolutionDescriptor_t convDesc;
+
+    checkCUDNN(cudnnCreateTensorDescriptor(&inputDesc));
+    checkCUDNN(cudnnCreateTensorDescriptor(&outputDesc));
+    checkCUDNN(cudnnCreateFilterDescriptor(&filterDesc));
+    checkCUDNN(cudnnCreateConvolutionDescriptor(&convDesc));
+
+    checkCUDNN(cudnnSetTensor4dDescriptor(inputDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 1, inputY * inputZ, inputX));
+    checkCUDNN(cudnnSetTensor4dDescriptor(outputDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, 1, inputY * inputZ, inputX));
+    checkCUDNN(cudnnSetFilter4dDescriptor(filterDesc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, 1, 1, psfY * psfZ, psfX));
+
+    checkCUDNN(cudnnSetConvolution2dDescriptor(convDesc, 0, 0, 1, 1, 1, 1, CUDNN_CONVOLUTION, CUDNN_DATA_FLOAT));
+
+    // Allocate device memory
+    float *d_input, *d_psf, *d_output;
     size_t inputSize = inputX * inputY * inputZ * sizeof(float);
     size_t psfSize = psfX * psfY * psfZ * sizeof(float);
     size_t outputSize = inputX * inputY * inputZ * sizeof(float);
 
-    float *d_input, *d_psf, *d_output;
     cudaMalloc(&d_input, inputSize);
     cudaMalloc(&d_psf, psfSize);
     cudaMalloc(&d_output, outputSize);
@@ -45,20 +46,36 @@ void H(const std::vector<float> &input, const std::vector<float> &psf, std::vect
     cudaMemcpy(d_input, input.data(), inputSize, cudaMemcpyHostToDevice);
     cudaMemcpy(d_psf, psf.data(), psfSize, cudaMemcpyHostToDevice);
 
-    dim3 blockSize(8, 8, 8);
-    dim3 gridSize((inputX + blockSize.x - 1) / blockSize.x,
-                  (inputY + blockSize.y - 1) / blockSize.y,
-                  (inputZ + blockSize.z - 1) / blockSize.z);
+    // Determine workspace size
+    size_t workspaceSize;
+    cudnnConvolutionFwdAlgo_t algo;
+    checkCUDNN(cudnnGetConvolutionForwardAlgorithm(cudnn, inputDesc, filterDesc, convDesc, outputDesc,
+                                                    CUDNN_CONVOLUTION_FWD_PREFER_FASTEST, 0, &algo));
+    checkCUDNN(cudnnGetConvolutionForwardWorkspaceSize(cudnn, inputDesc, filterDesc, convDesc, outputDesc, algo, &workspaceSize));
 
-    convolution3d<<<gridSize, blockSize>>>(d_input, d_psf, d_output, inputX, inputY, inputZ, psfX, psfY, psfZ);
+    void *workspace;
+    cudaMalloc(&workspace, workspaceSize);
+
+    // Perform convolution
+    const float alpha = 1.0f, beta = 0.0f;
+    checkCUDNN(cudnnConvolutionForward(cudnn, &alpha, inputDesc, d_input, filterDesc, d_psf, convDesc, algo, workspace, workspaceSize, &beta, outputDesc, d_output));
+
     cudaMemcpy(output.data(), d_output, outputSize, cudaMemcpyDeviceToHost);
 
+    // Cleanup
     cudaFree(d_input);
     cudaFree(d_psf);
     cudaFree(d_output);
+    cudaFree(workspace);
+
+    cudnnDestroyTensorDescriptor(inputDesc);
+    cudnnDestroyTensorDescriptor(outputDesc);
+    cudnnDestroyFilterDescriptor(filterDesc);
+    cudnnDestroyConvolutionDescriptor(convDesc);
+    cudnnDestroy(cudnn);
 }
 
-// Adjoint mapping (HT)
+// Adjoint mapping (HT) using cuDNN
 void HT(const std::vector<float> &input, const std::vector<float> &psf, std::vector<float> &output,
         int inputX, int inputY, int inputZ,
         int psfX, int psfY, int psfZ) {

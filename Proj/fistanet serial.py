@@ -255,34 +255,11 @@ class FISTANet(torch.nn.Module):
         return [x_final, layers_sym]
     
 
-class PerceptualLoss(nn.Module):
-    def __init__(self, feature_layers):
-        super(PerceptualLoss, self).__init__()
-        vgg = models.vgg16(weights=VGG16_Weights.DEFAULT).features
-        self.features = nn.ModuleList([vgg[i] for i in feature_layers]).eval()
-        for param in self.features.parameters():
-            param.requires_grad = False
 
-    def forward(self, output, target):
-        output_features = []
-        target_features = []
-        for feature in self.features:
-            output = feature(output)
-            target = feature(target)
-            output_features.append(output)
-            target_features.append(target)
-
-        loss = 0
-        for o, t in zip(output_features, target_features):
-            loss += torch.nn.functional.l1_loss(o, t)
-        return loss * lambda_perc
-    
 
 model = FISTANet(layer_num)
 model = model.to(device)
 
-perceptual_loss = PerceptualLoss(feature_layers=[3, 8, 15])  # VGG的卷积层索引
-perceptual_loss = perceptual_loss.to(device)
 
 model.train()
 
@@ -323,9 +300,7 @@ for epoch_i in range(start_epoch, end_epoch):
         
         ssim_loss = 1- total_ssim / batch_size
 
-        loss_perceptual = perceptual_loss(x_output, labels)
-
-        loss_all = loss_discrepancy + torch.mul(gamma, loss_constraint) + loss_perceptual + lambda_reg * torch.norm(x_output, p=2)
+        loss_all = loss_discrepancy + torch.mul(gamma, loss_constraint) + lambda_reg * torch.norm(x_output, p=2)
 
         optimizer.zero_grad()
         loss_all.backward()
